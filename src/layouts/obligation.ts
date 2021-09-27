@@ -119,7 +119,7 @@ export const ObligationParser = (
     dataFlat,
   } = ObligationLayout.decode(buffer) as ProtoObligation;
 
-  if (lastUpdate.slot.isZero()) {
+  if (lastUpdate.slot.eq(new Big(0))) {
     return;
   }
 

@@ -26,11 +26,12 @@ const reserveLookUpTable = {
   "BnhsmYVvNjXK3TGDHLj1Yr1jBGCmD1gZMkAyCwoXsHwt": "MER",
   "9gDF5W94RowoDugxT8cM29cX8pKKQitTp2uYVrarBSQ7": "mSOL",
   "GRJyCEezbZQibAEfBKCRAg5YoTPP2UcRSTC7RfzoMypy": "pSOL",
+  "7dXHPrJtwBjQqU1pLKfkHbq9TjQAK9jTms3rnj1i3G77": "SBR"
 }
 
 async function runPartialLiquidator() {
-  const clusterUrl = process.env.CLUSTER_URL || "https://solana-api.projectserum.com"
-  const checkInterval = parseFloat(process.env.CHECK_INTERVAL || "1000.0")
+  const clusterUrl = process.env.CLUSTER_URL || "https://port-finance.rpcpool.com"
+  const checkInterval = parseFloat(process.env.CHECK_INTERVAL || "5000.0")
   const connection = new Connection(clusterUrl, 'singleGossip')
 
   // The address of the Port Finance on the blockchain
@@ -169,7 +170,6 @@ function generateEnrichedObligation(obligation: Obligation, tokenToCurrentPrice:
   const borrowedAssetNames: string[] = [];
   for (const borrow of obligation.borrows) {
     let reservePubKey = borrow.borrowReserve.toBase58();
-    console.log(reservePubKey)
     let reserve = allReserve.get(reservePubKey)!.reserve;
     let name = reserveLookUpTable[reservePubKey];
     let tokenPriceWad = tokenToCurrentPrice.get(reservePubKey)!;
@@ -190,7 +190,7 @@ function generateEnrichedObligation(obligation: Obligation, tokenToCurrentPrice:
     // In percentage
     let liquidationThreshold = reserve.config.liquidationThreshold!;
     let tokenPriceWad = tokenToCurrentPrice.get(reservePubKey)!;
-    let totalPriceWad = deposit.depositedAmount.mul(totalSupply).mul(tokenPriceWad).mul(new Big(liquidationThreshold)).div(collateralTotalSupply).div(new Big(100)).div(TEN.pow(new Big(reserve.liquidity.mintDecimals)))
+    let totalPriceWad = deposit.depositedAmount.mul(totalSupply).mul(tokenPriceWad).mul(new Big(liquidationThreshold)).div(collateralTotalSupply).div(new Big(100)).div(TEN.pow(reserve.liquidity.mintDecimals))
     collateralValue = collateralValue.add(totalPriceWad)
     depositedAssetNames.push(name);
   }

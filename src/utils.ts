@@ -200,7 +200,7 @@ export function scaleToNormalNumber(lamport: Big, scaleDecimal: number, precisio
   if (scaleDecimal < precision) {
     throw new Error(`Scale decimal ${scaleDecimal} is smaller than ${precision}`);
   }
-  return lamport.div(TEN.pow(new Big(scaleDecimal - precision))).toNumber() / Math.pow(10, precision);
+  return lamport.div(TEN.pow(scaleDecimal - precision)).toNumber() / Math.pow(10, precision);
 }
 
 export function parseTokenAccountData(
