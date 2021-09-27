@@ -100,14 +100,13 @@ function redeemRemainingCollaterals(parsedReserveMap: Map<string, EnrichedReserv
 
 async function readSymbolPrice(connection: Connection, reserve: EnrichedReserve): Promise<Big> {
   if (reserve.reserve.liquidity.oracleOption === 0) {
-    return reserve.reserve.liquidity.marketPrice.div(TEN.pow(8));
+    return reserve.reserve.liquidity.marketPrice.div(WAD);
   }
 
   const pythData = await connection.getAccountInfo(reserve.reserve.liquidity.oraclePubkey);
   const parsedData = parsePriceData(pythData?.data!);
 
-  // we use a 10 ^ 10 scale.
-  return new Big(parsedData.price * 10 ** 10);
+  return new Big(parsedData.price);
 }
 
 async function readTokenPrices(connection, allReserve: Map<string, EnrichedReserve>): Promise<Map<string, Big>> {
@@ -151,7 +150,7 @@ async function getUnhealthyObligations(connection: Connection, programId: Public
   console.log(`Total number of loans are ${obligations.length} and possible liquidation debts are ${sortedObligations.length}`)
   sortedObligations.slice(0, DISPLAY_FIRST).forEach(
     ob => console.log(
-`Risk factor: ${ob.riskFactor.toFixed(4)} borrowed amount: ${scaleToNormalNumber(ob.loanValue, 10)} deposit amount: ${scaleToNormalNumber(ob.collateralValue, 10)}
+`Risk factor: ${ob.riskFactor.toFixed(4)} borrowed amount: ${ob.loanValue} deposit amount: ${ob.collateralValue}
 borrowed asset names: [${ob.borrowedAssetNames.toString()}] deposited asset names: [${ob.depositedAssetNames.toString()}]
 obligation names: ${ob.obligation.publicKey.toBase58()}
 `
@@ -159,7 +158,7 @@ obligation names: ${ob.obligation.publicKey.toBase58()}
   )
 
   tokenToCurrentPrice.forEach((price: Big, token: string) => {
-    console.log(`name: ${reserveLookUpTable[token]} price: ${scaleToNormalNumber(price, 10)}`)
+    console.log(`name: ${reserveLookUpTable[token]} price: ${price.toString()}`)
   });
   console.log("\n");
   return sortedObligations.filter(obligation => obligation.riskFactor >= 1);
@@ -172,9 +171,9 @@ function generateEnrichedObligation(obligation: Obligation, tokenToCurrentPrice:
     let reservePubKey = borrow.borrowReserve.toBase58();
     let reserve = allReserve.get(reservePubKey)!.reserve;
     let name = reserveLookUpTable[reservePubKey];
-    let tokenPriceWad = tokenToCurrentPrice.get(reservePubKey)!;
-    let totalPriceWad = borrow.borrowedAmountWads.mul(tokenPriceWad).div(WAD).div(TEN.pow(reserve.liquidity.mintDecimals))
-    loanValue = loanValue.add(totalPriceWad)
+    let tokenPrice = tokenToCurrentPrice.get(reservePubKey)!;
+    let totalPrice = borrow.borrowedAmountWads.mul(tokenPrice).div(WAD).div(TEN.pow(reserve.liquidity.mintDecimals))
+    loanValue = loanValue.add(totalPrice)
     borrowedAssetNames.push(name);
   }
   let collateralValue = ZERO;
@@ -189,9 +188,10 @@ function generateEnrichedObligation(obligation: Obligation, tokenToCurrentPrice:
     let collateralTotalSupply = reserve.collateral.mintTotalSupply;
     // In percentage
     let liquidationThreshold = reserve.config.liquidationThreshold!;
-    let tokenPriceWad = tokenToCurrentPrice.get(reservePubKey)!;
-    let totalPriceWad = deposit.depositedAmount.mul(totalSupply).mul(tokenPriceWad).mul(new Big(liquidationThreshold)).div(collateralTotalSupply).div(new Big(100)).div(TEN.pow(reserve.liquidity.mintDecimals))
-    collateralValue = collateralValue.add(totalPriceWad)
+    let tokenPrice = tokenToCurrentPrice.get(reservePubKey)!;
+    // divide by 100 to account for liquidation threshold
+    let totalPrice = deposit.depositedAmount.mul(totalSupply).mul(tokenPrice).mul(new Big(liquidationThreshold)).div(collateralTotalSupply).div(new Big(100)).div(TEN.pow(reserve.liquidity.mintDecimals))
+    collateralValue = collateralValue.add(totalPrice)
     depositedAssetNames.push(name);
   }
 
