@@ -2,7 +2,6 @@ import { AccountInfo, PublicKey } from '@solana/web3.js';
 import * as BufferLayout from 'buffer-layout';
 import * as Layout from './layout';
 import { LastUpdate } from './lastUpdate';
-// import BN = require('bn.js');
 import Big from 'big.js';
 
 export const ObligationLayout: typeof BufferLayout.Structure = BufferLayout.struct(

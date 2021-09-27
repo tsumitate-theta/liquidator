@@ -11,7 +11,6 @@ import { AccountLayout, Token, TOKEN_PROGRAM_ID } from '@solana/spl-token';
 import { redeemReserveCollateralInstruction } from './instructions/redeemReserveCollateral';
 import { parsePriceData } from '@pythnetwork/client';
 import Big from 'big.js';
-// import BN from 'bn.js';
 
 const SOL_MINT = "So11111111111111111111111111111111111111112";
 const DISPLAY_FIRST = 10;
@@ -30,7 +29,8 @@ const reserveLookUpTable = {
 }
 
 async function runPartialLiquidator() {
-  const clusterUrl = process.env.CLUSTER_URL || "https://port-finance.rpcpool.com"
+  // const cluster = process.env.CLUSTER || 'devnet'
+  const clusterUrl = process.env.CLUSTER_URL || "https://api.mainnet-beta.solana.com"
   const checkInterval = parseFloat(process.env.CHECK_INTERVAL || "5000.0")
   const connection = new Connection(clusterUrl, 'singleGossip')
 
