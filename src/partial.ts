@@ -449,7 +449,7 @@ async function liquidateAccount(
 
   signers.push(transferAuthority);
   const liquidationSig = await connection.sendTransaction(transaction, signers);
-  console.log(`liqudiation transaction sent: ${liquidationSig}.`);
+  notify(`liqudiation transaction sent: ${liquidationSig}.`);
 
   const tokenwallet = await findLargestTokenAccountForOwner(
     connection,
@@ -665,7 +665,7 @@ async function redeemCollateral(
     transferAuthority,
   ]);
 
-  console.log(`Redeem reserve collateral: ${redeemSig}.`);
+  notify(`Redeem reserve collateral: ${redeemSig}.`);
 }
 
 async function sellToken(tokenAccount: Wallet) {
