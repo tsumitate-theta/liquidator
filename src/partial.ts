@@ -449,7 +449,7 @@ async function liquidateAccount(
 
   signers.push(transferAuthority);
   const liquidationSig = await connection.sendTransaction(transaction, signers);
-  notify(`liqudiation transaction sent: ${liquidationSig}.`);
+  notify(`liqudiation transaction sent: https://solscan.io/tx/${liquidationSig}.`);
 
   const tokenwallet = await findLargestTokenAccountForOwner(
     connection,
@@ -665,7 +665,7 @@ async function redeemCollateral(
     transferAuthority,
   ]);
 
-  notify(`Redeem reserve collateral: ${redeemSig}.`);
+  notify(`Redeem reserve collateral: https://solscan.io/tx/${redeemSig}.`);
 }
 
 async function sellToken(tokenAccount: Wallet) {
