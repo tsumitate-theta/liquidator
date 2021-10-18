@@ -74,7 +74,7 @@ async function runPartialLiquidator() {
     Uint8Array.from(JSON.parse(fs.readFileSync(keyPairPath, 'utf-8'))),
   );
 
-  console.log(`Port liquidator launched on cluster=${clusterUrl}`);
+  notify(`Port liquidator launched on cluster=${clusterUrl}`);
 
   const reserveContext = await Port.forMainNet().getReserveContext();
   const wallets: Map<string, { publicKey: PublicKey; tokenAccount: Wallet }> =

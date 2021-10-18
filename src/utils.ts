@@ -19,8 +19,12 @@ export const STAKING_PROGRAM_ID = new PublicKey(
 export const ZERO: Big = new Big(0);
 
 export function notify(content: string) {
-  if (process.env.WEBHOOK_URL) {
-    axios.post(process.env.WEBHOOK_URL, { text: content });
+  if (content && process.env.WEBHOOK_URL) {
+    try {
+      axios.post(process.env.WEBHOOK_URL, { content });
+    } catch (err) {
+      console.error('Error posting to notify webhook:', err);
+    }
   }
   console.log(content);
 }
