@@ -3,23 +3,26 @@ import {
   Connection,
   PublicKey,
   SystemProgram,
-  Transaction,
   AccountInfo,
+  TransactionInstruction,
 } from '@solana/web3.js';
 import { homedir } from 'os';
 import * as fs from 'fs';
 import {
-  findLargestTokenAccountForOwner,
+  createAssociatedTokenAccount,
+  defaultTokenAccount,
+  fetchTokenAccount,
+  getOwnedTokenAccounts,
   notify,
+  sendTransaction,
   sleep,
   STAKING_PROGRAM_ID,
-  Wallet,
   ZERO,
 } from './utils';
 import { refreshReserveInstruction } from './instructions/refreshReserve';
 import { refreshObligationInstruction } from './instructions/refreshObligation';
 import { liquidateObligationInstruction } from './instructions/liquidateObligation';
-import { AccountLayout, Token, TOKEN_PROGRAM_ID } from '@solana/spl-token';
+import { AccountLayout, Token, TOKEN_PROGRAM_ID, u64 } from '@solana/spl-token';
 import { redeemReserveCollateralInstruction } from './instructions/redeemReserveCollateral';
 import { parsePriceData } from '@pythnetwork/client';
 import Big from 'big.js';
@@ -28,6 +31,10 @@ import { PortBalance } from '@port.finance/port-sdk/lib/models/PortBalance';
 import { ReserveContext } from '@port.finance/port-sdk/lib/models/ReserveContext';
 import { ReserveInfo } from '@port.finance/port-sdk/lib/models/ReserveInfo';
 import { ReserveId } from '@port.finance/port-sdk/lib/models/ReserveId';
+import {SwitchboardAccountType} from '@switchboard-xyz/switchboard-api';
+import { AccountInfo as TokenAccount } from '@solana/spl-token';
+import BN from 'bn.js';
+import { Provider, Wallet } from '@project-serum/anchor';
 
 const SOL_MINT = 'So11111111111111111111111111111111111111112';
 const DISPLAY_FIRST = 10;
@@ -43,6 +50,7 @@ const reserveLookUpTable = {
   '9gDF5W94RowoDugxT8cM29cX8pKKQitTp2uYVrarBSQ7': 'mSOL',
   'GRJyCEezbZQibAEfBKCRAg5YoTPP2UcRSTC7RfzoMypy': 'pSOL',
   '7dXHPrJtwBjQqU1pLKfkHbq9TjQAK9jTms3rnj1i3G77': 'SBR',
+  'BXt3EhK5Tj81aKaVSBD27rLFd5w8A6wmGKDh47JWohEu': 'Saber USDC - USDT LP',
 };
 
 interface EnrichedObligation {
@@ -73,39 +81,33 @@ async function runPartialLiquidator() {
   const payer = Keypair.fromSecretKey(
     Uint8Array.from(JSON.parse(fs.readFileSync(keyPairPath, 'utf-8'))),
   );
+  const provider = new Provider(connection, new Wallet(payer), {
+    preflightCommitment: "recent",
+    commitment: "recent",
+  })
 
   notify(`Port liquidator launched on cluster=${clusterUrl}`);
 
   const reserveContext = await Port.forMainNet().getReserveContext();
-  const wallets: Map<string, { publicKey: PublicKey; tokenAccount: Wallet }> =
-    new Map();
+  const wallets: Map<string, TokenAccount> = new Map();
 
-  for (const reserve of reserveContext.getAllReserves()) {
+  const tokenAccounts = await getOwnedTokenAccounts(connection, payer.publicKey);
+  for (const tokenAccount of tokenAccounts) {
     wallets.set(
-      reserve.getAssetId().toString(),
-      await findLargestTokenAccountForOwner(
-        connection,
-        payer,
-        reserve.getAssetId().key,
-      ),
-    );
-    wallets.set(
-      reserve.getShareId().toString(),
-      await findLargestTokenAccountForOwner(
-        connection,
-        payer,
-        reserve.getShareId().key,
-      ),
-    );
+      tokenAccount.mint.toString(),
+      tokenAccount
+    )
   }
 
+  await createNecessaryTokenAccounts(reserveContext, wallets, provider);
+
+  // eslint-disable-next-line
   while (true) {
     try {
-      redeemRemainingCollaterals(
-        reserveContext,
+      await redeemRemainingCollaterals(
+        provider,
         programId,
-        connection,
-        payer,
+        reserveContext,
         wallets,
       );
 
@@ -125,10 +127,9 @@ async function runPartialLiquidator() {
 which has borrowed ${unhealthyObligation.loanValue} ...
 `,
         );
-        await liquidateAccount(
-          connection,
+        await liquidateUnhealthyObligation(
+          provider,
           programId,
-          payer,
           unhealthyObligation,
           reserveContext,
           wallets,
@@ -144,35 +145,62 @@ which has borrowed ${unhealthyObligation.loanValue} ...
   }
 }
 
-function redeemRemainingCollaterals(
-  reserveContext: ReserveContext,
+async function createNecessaryTokenAccounts(reserveContext: ReserveContext, wallets: Map<string, TokenAccount>, provider: Provider) {
+  for (const reserve of reserveContext.getAllReserves()) {
+    if (!wallets.has(reserve.getAssetId().toString())) {
+      const aTokenAddress = await createAssociatedTokenAccount(
+        provider,
+        reserve.getAssetId().key
+      );
+      wallets.set(
+        reserve.getAssetId().toString(),
+        defaultTokenAccount(
+          aTokenAddress, provider.wallet.publicKey, reserve.getAssetId().key));
+    }
+    if (!wallets.has(reserve.getShareId().toString())) {
+      const aTokenAddress = await createAssociatedTokenAccount(
+        provider,
+        reserve.getShareId().key
+      );
+      wallets.set(
+        reserve.getShareId().toString(),
+        defaultTokenAccount(
+          aTokenAddress, provider.wallet.publicKey, reserve.getShareId().key));
+    }
+  }
+}
+
+async function redeemRemainingCollaterals(
+  provider: Provider,
   programId: PublicKey,
-  connection: Connection,
-  payer: Keypair,
-  wallets: Map<string, { publicKey: PublicKey; tokenAccount: Wallet }>,
+  reserveContext: ReserveContext,
+  wallets: Map<string, TokenAccount>,
 ) {
   const lendingMarket: PublicKey = reserveContext
     .getAllReserves()[0]
-    .getReserveId().key;
+    .getMarketId().key;
   reserveContext.getAllReserves().forEach(async (reserve) => {
     const [lendingMarketAuthority] = await PublicKey.findProgramAddress(
       [lendingMarket.toBuffer()],
       programId,
     );
-    const collateralWallet = await findLargestTokenAccountForOwner(
-      connection,
-      payer,
-      reserve.getShareId().key,
+    const collateralWalletPubkey = wallets.get(reserve.getShareId().key.toString());
+    if (!collateralWalletPubkey) {
+      throw new Error(`No collateral wallet for ${reserve.getShareId().key.toString()}`)
+    }
+
+    const collateralWallet = await fetchTokenAccount(
+      provider,
+      collateralWalletPubkey.address
     );
 
-    if (collateralWallet.tokenAccount.amount > 0) {
+    if (collateralWallet.amount.gt(new BN(0))) {
       await redeemCollateral(
+        provider,
         wallets,
         reserve,
-        payer,
         collateralWallet,
         lendingMarketAuthority,
-        connection,
       );
     }
   });
@@ -182,18 +210,39 @@ async function readSymbolPrice(
   connection: Connection,
   reserve: ReserveInfo,
 ): Promise<Big> {
-  if (reserve.getOracleId() === null) {
-    return reserve.getMarkPrice().getRaw();
+  const oracleId = reserve.getOracleId();
+  if (oracleId) {
+    const oracleData = await connection.getAccountInfo(oracleId.key);
+    if (!oracleData) {
+      throw new Error('cannot fetch account oracle data')
+    }
+    return await parseOracleData(oracleData, reserve);
   }
 
-  const pythData = await connection.getAccountInfo(reserve.getOracleId()!.key);
-  const parsedData = parsePriceData(pythData?.data!);
+  return reserve.getMarkPrice().getRaw();
 
-  return new Big(parsedData.price);
+}
+
+function parseOracleData(accountInfo: AccountInfo<Buffer>, reserveInfo: ReserveInfo): Promise<Big> {
+  if (accountInfo.owner.toString() === 'FsJ3A3u2vn5cTVofAjvy6y5kwABJAqYWpe4975bi2epH') {
+    const parsedPythData = parsePriceData(accountInfo.data);
+    return new Big(parsedPythData.price);
+  }
+
+  // TODO: this is not actually parsing switchboard key, it's a temporary work around since I don't
+  // know how to do it properly.
+  if (accountInfo.owner.toString() === 'DtmE9D2CSB4L5D6A15mraeEjrGMm6auWVzgaD8hK2tZM') {
+
+    if (accountInfo.data[0] === SwitchboardAccountType.TYPE_AGGREGATOR_RESULT_PARSE_OPTIMIZED) {
+      return reserveInfo.getMarkPrice().getRaw();
+    }
+  }
+
+  throw Error('Unrecognized oracle account')
 }
 
 async function readTokenPrices(
-  connection,
+  connection: Connection,
   reserveContext: ReserveContext,
 ): Promise<Map<string, Big>> {
   const tokenToCurrentPrice = new Map();
@@ -228,7 +277,7 @@ function isNoBorrow(obligation: PortBalance): boolean {
   return obligation.getLoans().length === 0;
 }
 
-// unused: helper only
+// eslint-disable-next-line
 function getTotalShareTokenCollateralized(
   portBalances: PortBalance[],
 ): Map<string, Big> {
@@ -299,14 +348,18 @@ function generateEnrichedObligation(
   tokenToCurrentPrice: Map<string, Big>,
   reserveContext: ReserveContext,
 ): EnrichedObligation {
-  let loanValue = ZERO;
+  let loanValue = new Big(0);
   const borrowedAssetNames: string[] = [];
   for (const borrow of obligation.getLoans()) {
-    let reservePubKey = borrow.getReserveId().toString();
-    let name = reserveLookUpTable[reservePubKey];
-    let reserve = reserveContext.getReserveByReserveId(borrow.getReserveId());
-    let tokenPrice: Big = tokenToCurrentPrice.get(reservePubKey)!;
-    let totalPrice = borrow
+    const reservePubKey = borrow.getReserveId().toString();
+    const name = reserveLookUpTable[reservePubKey];
+    const reserve = reserveContext.getReserveByReserveId(borrow.getReserveId());
+    const tokenPrice: Big = tokenToCurrentPrice.get(reservePubKey);
+    if (!tokenPrice) {
+      throw new Error("token price not found")
+    }
+
+    const totalPrice = borrow
       .getAsset()
       .getRaw()
       .mul(tokenPrice)
@@ -314,20 +367,23 @@ function generateEnrichedObligation(
     loanValue = loanValue.add(totalPrice);
     borrowedAssetNames.push(name);
   }
-  let collateralValue = ZERO;
+  let collateralValue: Big = new Big(0);
   const depositedAssetNames: string[] = [];
 
   for (const deposit of obligation.getCollaterals()) {
-    let reservePubKey = deposit.getReserveId().toString();
-    let name = reserveLookUpTable[reservePubKey];
-    let reserve = reserveContext.getReserveByReserveId(deposit.getReserveId());
-    let exchangeRatio = reserve.getExchangeRatio().getPct()?.getRaw();
-    let liquidationThreshold = reserve.params.liquidationThreshold.getRaw();
-    let tokenPrice = tokenToCurrentPrice.get(reservePubKey)!;
-    let totalPrice = deposit
+    const reservePubKey = deposit.getReserveId().toString();
+    const name = reserveLookUpTable[reservePubKey];
+    const reserve = reserveContext.getReserveByReserveId(deposit.getReserveId());
+    const exchangeRatio = reserve.getExchangeRatio().getPct();
+    const liquidationThreshold = reserve.params.liquidationThreshold.getRaw();
+    const tokenPrice = tokenToCurrentPrice.get(reservePubKey);
+    if (!tokenPrice || !exchangeRatio) {
+      throw new Error('error in token price or exchange ratio');
+    }
+    const totalPrice = deposit
       .getShare()
       .getRaw()
-      .div(exchangeRatio)
+      .div(exchangeRatio.getRaw())
       .mul(tokenPrice)
       .mul(liquidationThreshold)
       .div(reserve.getQuantityContext().multiplier);
@@ -335,10 +391,10 @@ function generateEnrichedObligation(
     depositedAssetNames.push(name);
   }
 
-  const riskFactor =
-    collateralValue === ZERO || loanValue === ZERO
+  const riskFactor: number =
+    collateralValue.eq(ZERO) || loanValue.eq(ZERO)
       ? 0
-      : loanValue.div(collateralValue);
+      : loanValue.div(collateralValue).toNumber();
 
   return {
     loanValue,
@@ -350,13 +406,12 @@ function generateEnrichedObligation(
   };
 }
 
-async function liquidateAccount(
-  connection: Connection,
+async function liquidateUnhealthyObligation(
+  provider: Provider,
   programId: PublicKey,
-  payer: Keypair,
   obligation: EnrichedObligation,
   reserveContext: ReserveContext,
-  wallets: Map<string, { publicKey: PublicKey; tokenAccount: Wallet }>,
+  wallets: Map<string, TokenAccount>,
 ) {
   const lendingMarket: PublicKey = reserveContext
     .getAllReserves()[0]
@@ -365,7 +420,7 @@ async function liquidateAccount(
     [lendingMarket.toBuffer()],
     programId,
   );
-  const transaction: Transaction = new Transaction();
+  const instructions: TransactionInstruction[] = [];
   const signers: Keypair[] = [];
 
   const toRefreshReserves: Set<ReserveId> = new Set();
@@ -376,7 +431,7 @@ async function liquidateAccount(
     toRefreshReserves.add(deposit.getReserveId());
   });
   toRefreshReserves.forEach((reserve) => {
-    transaction.add(
+    instructions.push(
       refreshReserveInstruction(reserveContext.getReserveByReserveId(reserve)),
     );
   });
@@ -403,89 +458,84 @@ async function liquidateAccount(
     return;
   }
 
-  const payerAccount = await connection.getAccountInfo(payer.publicKey);
-  const repayWallet = await findLargestTokenAccountForOwner(
-    connection,
-    payer,
-    repayReserve.getAssetId().key,
-  );
-  const withdrawWallet = await findLargestTokenAccountForOwner(
-    connection,
-    payer,
-    withdrawReserve.getShareId().key,
-  );
+  const payerAccount = await provider.connection.getAccountInfo(provider.wallet.publicKey);
+  if (!payerAccount) {
+    throw new Error(`No lamport for ${provider.wallet.publicKey}`);
+  }
 
-  signers.push(payer);
+  const repayWallet = wallets.get(repayReserve.getAssetId().toString());
+  const withdrawWallet = wallets.get(withdrawReserve.getShareId().toString());
+  
+  if (!repayWallet || !withdrawWallet) {
+    throw new Error("no collateral wallet found")
+  }
+  const latestRepayWallet = await fetchTokenAccount(provider, repayWallet.address);
 
   const transferAuthority =
     repayReserve.getAssetId().toString() !== SOL_MINT
       ? await liquidateByPayingToken(
-          connection,
-          transaction,
+          provider,
+          instructions,
           signers,
-          repayWallet.tokenAccount.amount,
-          repayWallet.publicKey,
-          withdrawWallet.publicKey,
+          latestRepayWallet.amount,
+          repayWallet.address,
+          withdrawWallet.address,
           repayReserve,
           withdrawReserve,
           obligation.obligation,
           lendingMarket,
           lendingMarketAuthority,
-          payer,
         )
       : await liquidateByPayingSOL(
-          connection,
-          transaction,
+          provider,
+          instructions,
           signers,
-          payerAccount!.lamports - 100_000_000,
-          wallets.get(withdrawReserve.getShareId().toString())!.publicKey,
+          new u64(payerAccount.lamports - 100_000_000),
+          withdrawWallet.address,
           repayReserve,
           withdrawReserve,
           obligation.obligation,
           lendingMarket,
           lendingMarketAuthority,
-          payer,
         );
 
   signers.push(transferAuthority);
-  const liquidationSig = await connection.sendTransaction(transaction, signers);
+
+  const liquidationSig = await sendTransaction(provider, instructions, signers);
   notify(`liqudiation transaction sent: ${liquidationSig}.`);
 
-  const tokenwallet = await findLargestTokenAccountForOwner(
-    connection,
-    payer,
-    withdrawReserve.getShareId().key,
-  );
+  const latestCollateralWallet = await fetchTokenAccount(
+    provider,
+    withdrawWallet.address
+  )
 
   await redeemCollateral(
+    provider,
     wallets,
     withdrawReserve,
-    payer,
-    tokenwallet,
+    latestCollateralWallet,
     lendingMarketAuthority,
-    connection,
   );
 }
 
-function liquidateByPayingSOL(
-  connection: Connection,
-  transaction: Transaction,
+async function liquidateByPayingSOL(
+  provider: Provider,
+  instructions: TransactionInstruction[],
   signers: Keypair[],
-  amount: number,
+  amount: u64,
   withdrawWallet: PublicKey,
   repayReserve: ReserveInfo,
   withdrawReserve: ReserveInfo,
   obligation: PortBalance,
   lendingMarket: PublicKey,
   lendingMarketAuthority: PublicKey,
-  payer: Keypair,
 ) {
   const wrappedSOLTokenAccount = new Keypair();
-  transaction.add(
+  instructions.push(
     SystemProgram.createAccount({
-      fromPubkey: payer.publicKey,
+      fromPubkey: provider.wallet.publicKey,
       newAccountPubkey: wrappedSOLTokenAccount.publicKey,
-      lamports: amount,
+      lamports: amount.toNumber(),
       space: AccountLayout.span,
       programId: new PublicKey(TOKEN_PROGRAM_ID),
     }),
@@ -493,13 +543,13 @@ function liquidateByPayingSOL(
       new PublicKey(TOKEN_PROGRAM_ID),
       new PublicKey(SOL_MINT),
       wrappedSOLTokenAccount.publicKey,
-      payer.publicKey,
+      provider.wallet.publicKey,
     ),
   );
 
-  const transferAuthority = liquidateByPayingToken(
-    connection,
-    transaction,
+  const transferAuthority = await liquidateByPayingToken(
+    provider,
+    instructions,
     signers,
     amount,
     wrappedSOLTokenAccount.publicKey,
@@ -509,15 +559,14 @@ function liquidateByPayingSOL(
     obligation,
     lendingMarket,
     lendingMarketAuthority,
-    payer,
   );
 
-  transaction.add(
+  instructions.push(
     Token.createCloseAccountInstruction(
       TOKEN_PROGRAM_ID,
       wrappedSOLTokenAccount.publicKey,
-      payer.publicKey,
-      payer.publicKey,
+      provider.wallet.publicKey,
+      provider.wallet.publicKey,
       [],
     ),
   );
@@ -562,10 +611,10 @@ async function fetchStakingAccounts(
 }
 
 async function liquidateByPayingToken(
-  connection: Connection,
-  transaction: Transaction,
+  provider: Provider,
+  instructions: TransactionInstruction[],
   signers: Keypair[],
-  amount: number,
+  amount: u64,
   repayWallet: PublicKey,
   withdrawWallet: PublicKey,
   repayReserve: ReserveInfo,
@@ -573,11 +622,10 @@ async function liquidateByPayingToken(
   obligation: PortBalance,
   lendingMarket: PublicKey,
   lendingMarketAuthority: PublicKey,
-  payer: Keypair,
 ): Promise<Keypair> {
   const transferAuthority = new Keypair();
   const stakeAccounts = await fetchStakingAccounts(
-    connection,
+    provider.connection,
     obligation.owner,
     withdrawReserve.staking_pool,
   );
@@ -585,7 +633,7 @@ async function liquidateByPayingToken(
   const laons = obligation.getLoans();
   const collaterals = obligation.getCollaterals();
 
-  transaction.add(
+  instructions.push(
     refreshObligationInstruction(
       obligation.getPortId().key,
       collaterals.map((deposit) => deposit.getReserveId().key),
@@ -595,7 +643,7 @@ async function liquidateByPayingToken(
       TOKEN_PROGRAM_ID,
       repayWallet,
       transferAuthority.publicKey,
-      payer.publicKey,
+      provider.wallet.publicKey,
       [],
       amount,
     ),
@@ -624,33 +672,40 @@ async function liquidateByPayingToken(
 }
 
 async function redeemCollateral(
-  wallets: Map<string, { publicKey: PublicKey; tokenAccount: Wallet }>,
+  provider: Provider,
+  wallets: Map<string, TokenAccount>,
   withdrawReserve: ReserveInfo,
-  payer: Keypair,
-  tokenwallet: { publicKey: PublicKey; tokenAccount: Wallet },
+  tokenwallet: TokenAccount,
   lendingMarketAuthority: PublicKey,
-  connection: Connection,
 ) {
-  const transaction = new Transaction();
+  const instructions: TransactionInstruction[] = [];
   const transferAuthority = new Keypair();
-  if (tokenwallet.tokenAccount.amount === 0) {
+  if (tokenwallet.amount.eq(new BN(0))) {
     return;
   }
 
-  transaction.add(
+  const collateralWallet = wallets.get(withdrawReserve.getShareId().toString());
+  const liquidityWallet = wallets.get(withdrawReserve.getAssetId().toString());
+
+  if (!collateralWallet || !liquidityWallet) {
+    throw new Error("No collateral or liquidity wallet found.")
+  }
+
+
+  instructions.push(
     Token.createApproveInstruction(
       TOKEN_PROGRAM_ID,
-      wallets.get(withdrawReserve.getShareId().toString())!.publicKey,
+      collateralWallet.address,
       transferAuthority.publicKey,
-      payer.publicKey,
+      provider.wallet.publicKey,
       [],
       1_000_000_000_000,
     ),
     refreshReserveInstruction(withdrawReserve),
     redeemReserveCollateralInstruction(
-      tokenwallet.tokenAccount.amount,
-      tokenwallet.publicKey,
-      wallets.get(withdrawReserve.getAssetId().toString())!.publicKey!,
+      tokenwallet.amount,
+      tokenwallet.address,
+      liquidityWallet.address,
       withdrawReserve.getReserveId().key,
       withdrawReserve.getShareId().key,
       withdrawReserve.getAssetBalanceId().key,
@@ -659,16 +714,14 @@ async function redeemCollateral(
       transferAuthority.publicKey,
     ),
   );
-
-  const redeemSig = await connection.sendTransaction(transaction, [
-    payer,
-    transferAuthority,
-  ]);
+  
+  const redeemSig = await sendTransaction(provider, instructions, [transferAuthority]);
 
   notify(`Redeem reserve collateral: ${redeemSig}.`);
 }
 
-async function sellToken(tokenAccount: Wallet) {
+// eslint-disable-next-line
+async function _sellToken(_tokenAccount: Wallet) {
   // TODO: sell token using Serum or Raydium
 }
 
