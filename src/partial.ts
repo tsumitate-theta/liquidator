@@ -265,7 +265,6 @@ async function getUnhealthyObligations(connection: Connection) {
     .map((obligation) =>
       generateEnrichedObligation(obligation, tokenToCurrentPrice, reserves),
     )
-    .filter((obligation) => obligation.loanValue > 10)
     .sort((obligation1, obligation2) => {
       return obligation2.riskFactor * 100 - obligation1.riskFactor * 100;
     });
